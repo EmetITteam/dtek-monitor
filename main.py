@@ -69,6 +69,16 @@ def get_full_data():
         
         resp = session.post(AJAX_URL, data=payload, timeout=15)
         json_resp = resp.json()
+        # --- ДИАГНОСТИКА (НАЧАЛО) ---
+        print("\n🔍 [РАЗВЕДКА] Структура ответа DTEK:")
+        print(f"Ключи верхнего уровня: {list(json_resp.keys())}")
+        
+        # Если вдруг есть поле 'table' или 'schedule', покажем это
+        if 'table' in json_resp:
+             print("⚠️ Найдено поле 'table'!")
+        if 'new_schedule' in json_resp:
+             print("⚠️ Найдено поле 'new_schedule'!")
+        # --- ДИАГНОСТИКА (КОНЕЦ) ---
         
         # 3. Обробка СТАТУСУ (для C2)
         house_data = json_resp.get('data', {}).get(REQ_HOUSE_KEY)
