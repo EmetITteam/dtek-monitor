@@ -2,11 +2,14 @@ import requests
 import json
 import hashlib
 import gspread
+import pytz  # <--- НОВАЯ БИБЛИОТЕКА
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 from bs4 import BeautifulSoup
 
 # --- НАЛАШТУВАННЯ ---
+# Мы берем ключи из переменных окружения (для GitHub) или файла (локально)
+# Но для простоты оставляем логику как была, GitHub сам создаст файл service_key.json
 SERVICE_ACCOUNT_FILE = 'service_key.json'
 SPREADSHEET_NAME = 'ГрафикОтключенийБот'
 WORKSHEET_NAME = 'Data'
@@ -18,6 +21,12 @@ REQ_CITY = "м. Дніпро"
 REQ_STREET = "вул. Полігонна"
 REQ_HOUSE_KEY = "10/Д"
 TARGET_GROUP = "GPV5.1"
+
+# --- ФУНКЦИЯ ВРЕМЕНИ ---
+def get_kyiv_time():
+    # Определяем часовой пояс Киева
+    tz = pytz.timezone('Europe/Kiev')
+    return datetime.now(tz)
 
 def connect_to_sheet():
     try:
@@ -47,11 +56,14 @@ def get_full_data():
         if csrf_inp: csrf_token = csrf_inp.get('value')
         
         # 2. Запит даних
+        # ИСПОЛЬЗУЕМ КИЕВСКОЕ ВРЕМЯ
+        kyiv_now = get_kyiv_time()
+        
         payload = {
             'method': 'getHomeNum',
             'data[0][name]': 'city', 'data[0][value]': REQ_CITY,
             'data[1][name]': 'street', 'data[1][value]': REQ_STREET,
-            'data[2][name]': 'updateFact', 'data[2][value]': datetime.now().strftime("%d.%m.%Y %H:%M"),
+            'data[2][name]': 'updateFact', 'data[2][value]': kyiv_now.strftime("%d.%m.%Y %H:%M"),
             '_csrf-dtek-dnem': csrf_token
         }
         
@@ -79,13 +91,12 @@ def get_full_data():
             schedule_json_str = json.dumps(my_schedule, ensure_ascii=False)
             
         # 5. ГЕНЕРАЦІЯ ХЕШУ
-        # Хешуємо статус + графік. Якщо щось зміниться, хеш зміниться.
         content_to_hash = f"{status_text}{schedule_json_str}{TARGET_GROUP}"
         data_hash = hashlib.md5(content_to_hash.encode('utf-8')).hexdigest()
         
         return {
             'hash': data_hash,
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'timestamp': kyiv_now.strftime("%Y-%m-%d %H:%M:%S"), # ТУТ ТОЖЕ КИЕВСКОЕ
             'status': status_text,
             'schedule': schedule_json_str,
             'group': TARGET_GROUP
@@ -96,7 +107,8 @@ def get_full_data():
         return None
 
 def main():
-    print(f"--- Запуск {datetime.now().strftime('%H:%M')} ---")
+    # Выводим время запуска (Киевское)
+    print(f"--- Запуск {get_kyiv_time().strftime('%H:%M')} (Kyiv Time) ---")
     
     data = get_full_data()
     
@@ -105,8 +117,6 @@ def main():
         if sheet:
             try:
                 # Оновлюємо рядок 2 ПОВНІСТЮ (A2:E2)
-                # A2=Hash, B2=Час, C2=Статус, D2=Група, E2=JSON
-                
                 row_values = [
                     data['hash'],
                     data['timestamp'],
