@@ -4,6 +4,7 @@ import hashlib
 import gspread
 import pytz
 import time
+import random
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -21,13 +22,10 @@ REQ_STREET = "вул. Полігонна"
 REQ_HOUSE_KEY = "10/Д"
 TARGET_GROUP = "GPV5.1"
 
-# --- ФУНКЦИИ ---
-
 def get_kyiv_time():
     return datetime.now(pytz.timezone('Europe/Kiev'))
 
 def connect_to_sheet():
-    print("   📊 Подключение к Google Таблице...")
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scope)
@@ -38,67 +36,93 @@ def connect_to_sheet():
         print(f"   ❌ Ошибка подключения к Google: {e}")
         return None
 
-def get_dtek_data_safe():
-    print("   🌍 Запрос к сайту DTEK...")
+def get_dtek_data_stealth():
+    print("   🌍 Запрос к сайту DTEK (Режим маскировки)...")
+    
+    # Список User-Agent, чтобы менять "личность" при каждом запросе
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0'
+    ]
+
     session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referer': BASE_URL + '/'
-    })
-
-    try:
-        # 1. Токен
-        resp_init = session.get(BASE_URL, timeout=15)
-        soup = BeautifulSoup(resp_init.text, 'html.parser')
-        csrf_token = None
-        csrf_inp = soup.find('input', {'name': '_csrf-dtek-dnem'})
-        if csrf_inp: csrf_token = csrf_inp.get('value')
-        
-        # 2. Основной запрос
-        kyiv_now = get_kyiv_time()
-        payload = {
-            'method': 'getHomeNum',
-            'data[0][name]': 'city', 'data[0][value]': REQ_CITY,
-            'data[1][name]': 'street', 'data[1][value]': REQ_STREET,
-            'data[2][name]': 'updateFact', 'data[2][value]': kyiv_now.strftime("%d.%m.%Y %H:%M"),
-            '_csrf-dtek-dnem': csrf_token
-        }
-        
-        resp = session.post(AJAX_URL, data=payload, timeout=15)
-        
-        # Проверка статуса HTTP
-        if resp.status_code != 200:
-            print(f"   ❌ Ошибка сервера DTEK: HTTP {resp.status_code}")
-            return None
-
-        # Попытка разобрать JSON
+    
+    # 3 ПОПЫТКИ пробиться
+    for attempt in range(1, 4):
         try:
-            json_resp = resp.json()
-        except json.JSONDecodeError:
-            print("   ❌ DTEK вернул не JSON (возможно, сайт перегружен или заблокирован).")
-            return None
+            # Настраиваем заголовки как реальный браузер
+            current_ua = random.choice(user_agents)
+            session.headers.update({
+                'User-Agent': current_ua,
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7', # Говорим, что мы из Украины
+                'Referer': BASE_URL + '/',
+                'Origin': BASE_URL,
+                'X-Requested-With': 'XMLHttpRequest',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin'
+            })
 
-        return json_resp
+            print(f"   🔄 Попытка {attempt}/3...")
+            
+            # 1. Получаем Cookies и Token
+            resp_init = session.get(BASE_URL, timeout=10)
+            soup = BeautifulSoup(resp_init.text, 'html.parser')
+            csrf_token = None
+            csrf_inp = soup.find('input', {'name': '_csrf-dtek-dnem'})
+            if csrf_inp: csrf_token = csrf_inp.get('value')
+            
+            # 2. Делаем запрос
+            kyiv_now = get_kyiv_time()
+            payload = {
+                'method': 'getHomeNum',
+                'data[0][name]': 'city', 'data[0][value]': REQ_CITY,
+                'data[1][name]': 'street', 'data[1][value]': REQ_STREET,
+                'data[2][name]': 'updateFact', 'data[2][value]': kyiv_now.strftime("%d.%m.%Y %H:%M"),
+                '_csrf-dtek-dnem': csrf_token
+            }
+            
+            # Случайная пауза перед AJAX запросом (как человек)
+            time.sleep(random.uniform(1, 3))
+            
+            resp = session.post(AJAX_URL, data=payload, timeout=15)
+            
+            # Проверяем ответ
+            try:
+                json_resp = resp.json()
+                # Если в ответе есть данные — успех!
+                if 'data' in json_resp or 'preset' in json_resp:
+                    return json_resp
+            except json.JSONDecodeError:
+                # Если вернулся HTML с ошибкой
+                if attempt < 3:
+                    print("      ⚠️ DTEK заблокировал запрос. Ждем 5 сек...")
+                    time.sleep(5)
+                    continue # Пробуем еще раз
+                else:
+                    print("      ❌ Не удалось получить JSON. Ответ сервера (первые 100 симв.):")
+                    print(f"      {resp.text[:100]}")
+                    return None
 
-    except Exception as e:
-        print(f"   ❌ Ошибка соединения: {e}")
-        return None
+        except Exception as e:
+            print(f"      ⚠️ Ошибка соединения: {e}")
+            time.sleep(5)
+    
+    return None
 
 def process_data(json_resp):
-    print("   ⚙️ Обработка данных (План + Факт)...")
+    print("   ⚙️ Обработка данных...")
     
-    # 1. Текстовый статус
+    # 1. Статус
     house_data = json_resp.get('data', {}).get(REQ_HOUSE_KEY)
     status_text = "❓ Невідомо"
     if house_data:
         raw_status = house_data.get('sub_type', '')
-        if raw_status:
-            status_text = f"⚠️ {raw_status}"
-        else:
-            status_text = "✅ Світло є (за графіком)"
+        status_text = f"⚠️ {raw_status}" if raw_status else "✅ Світло є (за графіком)"
 
-    # 2. График (Слияние)
+    # 2. Слияние графиков
     full_preset = json_resp.get('preset', {})
     final_schedule = full_preset.get('data', {}).get(TARGET_GROUP, {})
     
@@ -113,8 +137,7 @@ def process_data(json_resp):
                     dt = datetime.fromtimestamp(ts, pytz.timezone('Europe/Kiev'))
                     day_key = str(dt.isoweekday()) 
                     final_schedule[day_key] = groups_data[TARGET_GROUP]
-                except:
-                    pass
+                except: pass
 
     schedule_json_str = json.dumps(final_schedule, ensure_ascii=False)
     content_to_hash = f"{status_text}{schedule_json_str}{TARGET_GROUP}"
@@ -131,20 +154,18 @@ def process_data(json_resp):
 def main():
     print(f"--- ЗАПУСК {get_kyiv_time().strftime('%H:%M')} (Kyiv Time) ---")
     
-    # ШАГ 1: Скачиваем
-    raw_json = get_dtek_data_safe()
+    raw_json = get_dtek_data_stealth()
+    
     if not raw_json:
-        print("⚠️ Данные не получены. Пропускаем запись в таблицу.")
-        return # Выходим, чтобы не затереть таблицу ошибкой
+        print("❌ Все попытки исчерпаны. Данные не получены.")
+        # Не пишем ошибку в таблицу, чтобы не пугать бота, просто ждем следующего запуска по расписанию
+        return 
 
-    # ШАГ 2: Обрабатываем
     clean_data = process_data(raw_json)
     
-    # ШАГ 3: Пишем
     sheet = connect_to_sheet()
     if sheet:
         try:
-            print("   💾 Запись в Таблицу (строка 2)...")
             row_values = [
                 clean_data['hash'],
                 clean_data['timestamp'],
@@ -152,11 +173,10 @@ def main():
                 clean_data['group'],
                 clean_data['schedule']
             ]
-            # Обновляем диапазон A2:E2
             sheet.update(range_name='A2:E2', values=[row_values])
-            print(f"✅ УСПЕХ! Таблица обновлена. Статус: {clean_data['status']}")
+            print(f"✅ УСПЕХ! Таблица обновлена.")
         except Exception as e:
-            print(f"   ❌ Ошибка при записи в таблицу: {e}")
+            print(f"   ❌ Ошибка записи: {e}")
 
 if __name__ == "__main__":
     main()
